@@ -1,2 +1,0 @@
-# Oneck
-Self-Study

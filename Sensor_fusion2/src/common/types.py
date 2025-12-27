@@ -1,22 +1,34 @@
+# src/fusion/types.py
+from __future__ import annotations
 from dataclasses import dataclass, field
+from typing import List, Literal, Optional
 import numpy as np
-from typing import Optional, List
+
+Source = Literal["radar", "cam_gt"]
+
 
 @dataclass
-class Detection3D:
-    label: str
-    translation: np.ndarray  # [x, y, z]
-    size: np.ndarray         # [w, l, h]
-    velocity: Optional[np.ndarray] = None  # [vx, vy] (Radar용)
-    score: float = 0.0
-    sensor_id: str = ""      # 어떤 센서에서 왔는지 (LIDAR, RADAR_FRONT 등)
+class Detection:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    score: float
+    source: Source
+
 
 @dataclass
 class Track:
     track_id: int
-    label: str
-    state: np.ndarray        # [x, y, z, vx, vy, yaw, yaw_rate]
-    covariance: np.ndarray
-    age: int = 1
-    hits: int = 1
-    status: str = "tentative" # tentative, confirmed, deleted
+    x: float
+    y: float
+    vx: float
+    vy: float
+    P: np.ndarray  # (4,4)
+    age: int = 0
+    hits: int = 0
+    misses: int = 0
+    history: List[np.ndarray] = field(default_factory=list)
+
+    def state(self) -> np.ndarray:
+        return np.array([self.x, self.y, self.vx, self.vy], dtype=np.float64)

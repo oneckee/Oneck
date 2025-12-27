@@ -1,60 +1,106 @@
+# src/run_pipeline.py
+from __future__ import annotations
+
 import os
 import sys
+from pathlib import Path
+from typing import Optional
+
+# ---- Make imports work when running: python src/run_pipeline.py
+THIS_FILE = Path(__file__).resolve()
+SRC_DIR = THIS_FILE.parent
+PROJECT_ROOT = SRC_DIR.parent
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+import argparse
+
 from nuscenes.nuscenes import NuScenes
-from sensors.imu_processing import IMUProcessor
-from fusion.object_pipeline import ObjectPipeline
-from visualization.bev_realtime import BEVVisualizer
-from fusion.time_sync import TimeSynchronizer
 
-def run_fusion_system():
-    # 1. 경로 설정 (절대 경로)
-    base_path = '/Users/oneck/Desktop/Sensor_Fusion2'
-    dataroot = os.path.join(base_path, 'data/nuscenes')
+from fusion.object_pipeline import PipelineConfig, ObjectPipeline
+from visualize_bev import render_bev_frame
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--version", type=str, default="v1.0-mini")
+    p.add_argument(
+        "--dataroot",
+        type=str,
+        default=str(PROJECT_ROOT / "data" / "nuscenes"),
+        help="Path to data/nuscenes (NOT to v1.0-mini directly)",
+    )
+    p.add_argument("--scene_idx", type=int, default=0)
+    p.add_argument("--max_frames", type=int, default=40)
+    p.add_argument("--output_dir", type=str, default=str(PROJECT_ROOT / "output" / "bev_frames"))
+    p.add_argument("--dpi", type=int, default=130)
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    dataroot = Path(args.dataroot).expanduser().resolve()
+    version_dir = dataroot / args.version
+
+    print("PROJECT_ROOT:", PROJECT_ROOT)
+    print("DATA_ROOT   :", dataroot)
+    print("VERSION_DIR :", version_dir)
+
+    # ---- HARD FAIL (빈 프레임 저장 방지)
+    assert dataroot.exists(), f"dataroot not found: {dataroot}"
+    assert version_dir.exists(), f"Database version not found: {version_dir}\n" \
+                                 f"Expected: <dataroot>/{args.version} (e.g. data/nuscenes/v1.0-mini)"
+
+    nusc = NuScenes(version=args.version, dataroot=str(dataroot), verbose=False)
+
+    # ---- pick scene
+    assert args.scene_idx < len(nusc.scene), f"scene_idx out of range: {args.scene_idx}"
+    scene = nusc.scene[args.scene_idx]
+    first_sample_token = scene["first_sample_token"]
+    print(f"🎬 scene={scene['name']} ({args.scene_idx}) first_sample_token={first_sample_token}")
+
+    out_dir = Path(args.output_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print("📦 output_dir:", out_dir)
+
+    cfg = PipelineConfig()
+    pipe = ObjectPipeline(cfg)
+
+    # ---- iterate samples
+    token = first_sample_token
+    frame_i = 0
+    while token:
+        sample = nusc.get("sample", token)
+
+        frame = pipe.process(nusc, sample)
+
+        # --- sanity print (여기 숫자가 0이면 로더 문제)
+        print(
+            f"[frame {frame_i:03d}] "
+            f"lidar_pts={frame['lidar_xy'].shape[0]} "
+            f"radar_pts={frame['radar_xy'].shape[0]} "
+            f"radar_obj={len(frame.get('detections', []))} "
+            f"tracks={len(frame.get('tracks', []))}"
+
+            # f"cam_dets={len(frame['cam_dets'])} "
+            # f"tracks={len(frame['tracks'])}"
+        )
+
     
-    # 2. nuScenes 데이터셋 로드
-    nusc = NuScenes(version='v1.0-mini', dataroot=dataroot, verbose=True)
-    scene = nusc.scene[0] # scene-0061 등 분석할 씬 선택
-    
-    # 3. 각 모듈 초기화
-    # TimeSynchronizer가 씬의 샘플들을 정상적으로 가져오도록 설정
-    time_sync = TimeSynchronizer(nusc, scene)
-    imu_proc = IMUProcessor(dataroot, scene['name'])
-    pipeline = ObjectPipeline()
-    
-    # 시각화 결과 저장 경로 설정
-    output_path = os.path.join(base_path, 'output/bev_frames')
-    visualizer = BEVVisualizer(output_dir=output_path)
 
-    print(f"\n🚀 {scene['name']} 분석 및 이미지 저장 시작...")
-    print(f"📍 저장 위치: {output_path}")
 
-    frame_idx = 0
-    try:
-        while True:
-            # 다음 센서 데이터 가져오기 (utime, type 등이 포함된 msg)
-            msg = time_sync.get_next()
-            if msg is None:
-                break
-            
-            # 4. 퓨전 파이프라인 처리
-            pipeline.process_sensor_data(msg, imu_proc)
-            
-            # 5. 결과 시각화 및 이미지 파일 저장
-            # pipeline.tracks 정보를 바탕으로 BEV 이미지를 생성합니다.
-            visualizer.render(pipeline.tracks, frame_idx)
-            
-            # 터미널에 실시간 진행률 표시
-            sys.stdout.write(f"\r처리 중: [Frame {frame_idx:03d}] ")
-            sys.stdout.flush()
-            
-            frame_idx += 1
+        out_png = out_dir / f"frame_{frame_i:04d}.png"
+        render_bev_frame(frame, save_path=str(out_png), dpi=args.dpi)
 
-    except Exception as e:
-        print(f"\n❌ 실행 중 오류 발생: {e}")
-        import traceback
-        traceback.print_exc()
+        frame_i += 1
+        if frame_i >= args.max_frames:
+            break
 
-    print(f"\n✅ 분석 완료! 총 {frame_idx}개의 이미지가 저장되었습니다.")
+        token = sample["next"]
+
+    print(f"✅ done. saved {frame_i} frames to: {out_dir}")
+
 
 if __name__ == "__main__":
-    run_fusion_system()
+    main()
